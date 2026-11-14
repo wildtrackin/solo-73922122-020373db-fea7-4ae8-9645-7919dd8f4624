@@ -1,0 +1,6 @@
+fastapi==0.162.7
+uvicorn[standard]==0.54.0
+boto3==1.44.3
+tifffile==2026.3.3
+numpy==2.4.6
+pydantic==2.14.3

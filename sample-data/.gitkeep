@@ -1,0 +1,2 @@
+# 演示样例由 scripts/generate_samples.py 在容器内生成（纯合成数据，无隐私图像）。
+# 此占位文件保留目录结构，使 bind mount 目标在首次启动时即存在。
