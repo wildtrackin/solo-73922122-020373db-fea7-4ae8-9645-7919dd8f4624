@@ -30,6 +30,8 @@ class ObjectStore(Protocol):
     def list_parts(self, object_key: str, upload_id: str) -> list[dict[str, Any]]: ...
     def list_multipart_uploads(self) -> list[dict[str, Any]]: ...
     def head_object(self, object_key: str) -> dict[str, Any]: ...
+    def put_object(self, object_key: str, data: bytes,
+                   content_type: str = "image/tiff") -> None: ...
     def delete_object(self, object_key: str) -> None: ...
     def download_to_file(self, object_key: str, dest_path: str) -> None: ...
     def get_object_stream(self, object_key: str) -> Any: ...
@@ -163,6 +165,16 @@ class S3Store:
             self.client.delete_object(Bucket=self.bucket, Key=object_key)
         except ClientError as exc:
             raise StorageError(f"删除对象失败: {exc}") from exc
+
+    def put_object(self, object_key: str, data: bytes,
+                   content_type: str = "image/tiff") -> None:
+        try:
+            self.client.put_object(
+                Bucket=self.bucket, Key=object_key, Body=data,
+                ContentType=content_type,
+            )
+        except ClientError as exc:
+            raise StorageError(f"裁片对象写入失败: {exc}") from exc
 
     def download_to_file(self, object_key: str, dest_path: str) -> None:
         try:

@@ -4,6 +4,11 @@
 续传进本地 MinIO 数据湖；合并后核验 OME 元数据与 TIFF 页目录，**坏图不得入湖**；
 分析程序只能读到完整原件。
 
+入湖后还可按 **T/Z/C 逻辑下标 + X/Y 像素矩形** 裁剪焦层局部视野：
+严格按 OME 轴与 TiffData 映射定位目标平面，解码后生成可下载的
+**二维 OME-TIFF**（保留通道名与像素物理尺寸，原件不改），直接交给
+只接收二维图像的分析程序。
+
 技术栈：FastAPI · SQLite（WAL）· tifffile · boto3（S3 multipart）· 本地 MinIO · Uvicorn
 
 ---
@@ -121,6 +126,50 @@ curl -O http://localhost:8000/uploads/$UID/object    # 流式下载完整原件
 
 `open / completing / aborted / invalid` 状态访问均返回 409/410，分析程序无法读到半成品。
 
+### 2.7 焦层视野裁剪（仅 completed）
+
+```bash
+# 取 T=1、Z=2、C=1 平面上 (x=40, y=24) 起 200x120 的局部视野
+curl -X POST http://localhost:8000/uploads/$UID/crops \
+  -H 'Content-Type: application/json' \
+  -d '{"t":1,"z":2,"c":1,"x":40,"y":24,"width":200,"height":120}'
+```
+
+首次创建返回 **201**，响应含 `download_url`；同一 upload_id + 同一组参数
+幂等，重放返回 **200** 与同一 `crop_id`，不重复解码/发布：
+
+```json
+{
+  "crop_id": "f31c...", "upload_id": "ab12...",
+  "t": 1, "z": 2, "c": 1, "x": 40, "y": 24, "width": 200, "height": 120,
+  "dtype": "uint16", "size_bytes": 48720, "sha256": "…",
+  "download_url": "/crops/f31c..."
+}
+```
+
+```bash
+curl http://localhost:8000/uploads/$UID/crops   # 列出该上传的全部裁片
+curl -OJ http://localhost:8000/crops/$CROP_ID   # 下载二维 OME-TIFF（image/tiff）
+```
+
+裁剪语义与约束：
+
+- 按 **OME 轴及 TiffData 映射**（`FirstZ/FirstC/FirstT/IFD/PlaneCount` +
+  `DimensionOrder`）定位目标平面；映射重叠、越界或不完整一律
+  **422 `plane_mapping_ambiguous`**，绝不猜测；
+- 裁片为**单平面二维 OME-TIFF**，宽高与像素逐点对应裁剪区域；
+  原图有**通道名称、像素物理尺寸**（PhysicalSizeX/Y 及单位）时一并保留；
+  **原件只读不改**；
+- 仅支持：**单文件**数据集（TiffData 不引用外部文件）、**单图像序列**、
+  **灰度**（SamplesPerPixel=1）**uint8/uint16**，且目标平面解码后
+  **不超过 16 MiB**；超出即 422 `unsupported_image` / `plane_too_large`；
+- SizeZ/SizeC/SizeT 为 1 的**缺失轴仅接受下标 0**，其余下标越界
+  → 400 `axis_index_out_of_range`；裁剪矩形越出图像
+  → 400 `crop_out_of_bounds`；
+- 湖内对象读取中断（下载字节数不符）→ 502 `storage_error`；
+  目标平面解码失败 → 500 `plane_read_failed`；任何失败都**不返回残缺裁片**，
+  也不会留下裁片记录或对象。
+
 ---
 
 ## 3. 状态机与崩溃恢复
@@ -152,7 +201,7 @@ curl -O http://localhost:8000/uploads/$UID/object    # 流式下载完整原件
 
 ---
 
-## 4. 故障演示（7 个场景）
+## 4. 故障演示（8 个场景）
 
 `ENABLE_FAULTS=true` 时开放 `POST /dev/faults` 注入两个真实崩溃点
 （SIGTERM，容器 `restart: unless-stopped` 自动拉起，等价主机重启）：
@@ -166,6 +215,7 @@ curl -O http://localhost:8000/uploads/$UID/object    # 流式下载完整原件
 | 5 `crash_after_part` | 第 3 片写 S3 后崩溃，重启只补缺片即完成 |
 | 6 `crash_after_merge` | 合并后崩溃，重启续完；重试 complete 幂等、湖中仅一个对象 |
 | 7 坏图 | 缺 OME-XML 的 TIFF 返回 422、对象删除、查询不开放 |
+| 8 焦层裁剪 | TZC 多维图按 T/Z/C+矩形裁剪，裁片像素逐点核验、通道名/物理尺寸保留、原件不变、越界 400 |
 
 ```bash
 docker compose exec api python scripts/demo.py
@@ -184,27 +234,32 @@ python scripts/smoke_local.py
 ## 5. 测试
 
 ```bash
-python -m pytest          # 28 项：服务层并发/竞争/恢复 + HTTP 层全语义
+python -m pytest          # 52 项：服务层并发/竞争/恢复 + HTTP 层全语义 + 裁剪全场景
 ```
 
 覆盖：多分片并发、同片幂等/409、片长校验、完成/放弃 CAS 竞争（多轮）、
 放弃清残件与迟到写入拒绝、无 OME 元数据/截断 TIFF/SHA256 不符三类坏图拦截、
-两类崩溃窗口恢复、孤儿 multipart 清理、complete 幂等。
+两类崩溃窗口恢复、孤儿 multipart 清理、complete 幂等；
+裁剪的像素级核验（TZC 定位、多块 TiffData 映射、DimensionOrder 默认排布）、
+通道名/物理尺寸保留、缺轴下标/矩形越界/轴越界 400、非 uint8-16/RGB/多文件/
+多序列/平面超 16 MiB 422、TiffData 重叠/不完整/IFD 越界 422、
+读取中断 502、同参幂等与裁片下载。
 
 ## 6. 目录结构
 
 ```
 app/
-  config.py            # 环境变量配置、8MiB 常量
-  db.py                # SQLite WAL schema、CAS 状态流转
+  config.py            # 环境变量配置、8MiB 分片/16MiB 平面常量
+  db.py                # SQLite WAL schema、CAS 状态流转、裁片幂等落库
   storage.py           # boto3 真实 S3 multipart 适配
   image_validation.py  # OME-XML + IFD 页目录核验、尺寸提取
+  crop.py              # OME 轴/TiffData 平面定位、灰度 uint8/16 裁剪、二维 OME-TIFF 生成
   faults.py            # 故障注入（SIGTERM）
-  service.py           # 生命周期/幂等/并发/放弃/启动恢复
+  service.py           # 生命周期/幂等/并发/放弃/启动恢复/裁剪编排
   main.py              # FastAPI 路由与错误映射
 scripts/
-  generate_samples.py  # 无隐私合成 OME-TIFF
-  demo.py              # Docker 内 7 场景故障演示
+  generate_samples.py  # 无隐私合成 OME-TIFF（含 TZC 多维样例）
+  demo.py              # Docker 内 8 场景故障演示
   smoke_local.py       # 无 Docker 本地 HTTP 冒烟
 tests/                 # pytest 套件（内存 S3 模拟 multipart 语义）
 docker-compose.yml     # 持久化 MinIO + API
@@ -215,4 +270,7 @@ docker-compose.yml     # 持久化 MinIO + API
 - 单进程 + 每 `upload_id` 一把 `RLock`：同任务分片/完成/放弃串行，不同任务不互斥；
 - 网络 IO（S3 调用）不持数据库事务，SQLite 事务只覆盖本地状态变更；
 - 所有“终态发布”以 SQLite 状态为准，S3 对象存在但状态未完成时一律不可读；
-- 对象键含 `upload_id`，同一样本反复上传不会互相覆盖。
+- 对象键含 `upload_id`，同一样本反复上传不会互相覆盖；
+- 裁片以 `(upload_id, t, z, c, x, y, width, height)` 唯一约束幂等发布，
+  并发同参裁剪只有一个入湖，其余清理自身对象后返回已存在裁片；
+- 裁剪只读原件（下载到临时文件后解码），裁片另写新对象，原件逐字节不变。

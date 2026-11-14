@@ -40,3 +40,31 @@ class BadImageError(ApiError):
 class StorageError(ApiError):
     status_code = 502
     code = "storage_error"
+
+
+class BadRequestError(ApiError):
+    """请求参数本身非法（如轴下标/裁剪矩形越界）。"""
+
+    status_code = 400
+    code = "bad_request"
+
+
+class UnsupportedImageError(ApiError):
+    """图像超出裁剪支持范围（多文件/多序列/非灰度/非 uint8-16）。"""
+
+    status_code = 422
+    code = "unsupported_image"
+
+
+class PlaneMappingError(ApiError):
+    """OME TiffData 平面映射重叠、越界或不完整，无法唯一定位平面。"""
+
+    status_code = 422
+    code = "plane_mapping_ambiguous"
+
+
+class PlaneReadError(ApiError):
+    """湖内对象读取中断或目标平面解码失败。"""
+
+    status_code = 500
+    code = "plane_read_failed"

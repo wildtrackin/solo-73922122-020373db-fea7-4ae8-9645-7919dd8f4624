@@ -4,6 +4,8 @@
 产物：
   good-large.ome.tiff  多页大文件（约 24 MiB，演示 8 MiB 分片续传）
   good-small.ome.tiff  单页小文件（末片短分片）
+  good-tzc.ome.tiff    多维文件（T=2 Z=3 C=2，含通道名与物理像素尺寸，
+                       演示焦层视野裁剪）
   bad-no-ome.tiff      普通 TIFF，缺 OME 元数据（演示坏图拦截）
 """
 from __future__ import annotations
@@ -34,6 +36,26 @@ def main() -> None:
     small = rng.integers(0, 256, size=(256, 256), dtype=np.uint8)
     with tifffile.TiffWriter(OUT_DIR / "good-small.ome.tiff") as w:
         w.write(small, photometric="minisblack", metadata={"axes": "YX"})
+
+    # 多维文件：T=2 Z=3 C=2，512x384 uint16，含通道名与物理像素尺寸
+    tzc = (
+        np.arange(2 * 3 * 2 * 512 * 384, dtype=np.uint16)
+        .reshape(2, 3, 2, 512, 384)
+        + rng.integers(0, 128, size=(2, 3, 2, 512, 384), dtype=np.uint16)
+    )
+    with tifffile.TiffWriter(OUT_DIR / "good-tzc.ome.tiff", ome=True) as w:
+        w.write(
+            tzc,
+            photometric="minisblack",
+            metadata={
+                "axes": "TZCYX",
+                "Channel": {"Name": ["DAPI", "GFP"]},
+                "PhysicalSizeX": 0.325,
+                "PhysicalSizeXUnit": "µm",
+                "PhysicalSizeY": 0.325,
+                "PhysicalSizeYUnit": "µm",
+            },
+        )
 
     # 坏图：结构合法的 TIFF，但不含 OME-XML
     tifffile.imwrite(

@@ -127,6 +127,11 @@ class FakeS3:
         with self._lock:
             self.objects.pop(object_key, None)
 
+    def put_object(self, object_key: str, data: bytes,
+                   content_type: str = "image/tiff") -> None:
+        with self._lock:
+            self.objects[object_key] = bytes(data)
+
     def download_to_file(self, object_key: str, dest_path: str) -> None:
         with self._lock:
             data = self.objects.get(object_key)

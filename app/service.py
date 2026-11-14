@@ -9,6 +9,7 @@ from typing import Any
 
 from . import db
 from .config import MAX_PART_NUMBER, PART_SIZE, settings
+from .crop import crop_ome_tiff
 from .errors import ConflictError, GoneError, NotFoundError, StorageError
 from .faults import fault_injector
 from .image_validation import validate_ome_tiff
@@ -38,6 +39,18 @@ def expected_part_size(total_bytes: int, part_number: int, expected_parts: int) 
         remainder = total_bytes % PART_SIZE
         return remainder if remainder else PART_SIZE
     return PART_SIZE
+
+
+def _crop_filename(upload_filename: str, *, t: int, z: int, c: int,
+                   x: int, y: int, width: int, height: int) -> str:
+    """由原始文件名派生裁片下载名：{stem}_t1z2c0_x40y24_200x120.ome.tiff。"""
+    stem = upload_filename
+    lower = stem.lower()
+    for suffix in (".ome.tiff", ".ome.tif", ".tiff", ".tif"):
+        if lower.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return f"{stem}_t{t}z{z}c{c}_x{x}y{y}_{width}x{height}.ome.tiff"
 
 
 class UploadService:
@@ -371,6 +384,109 @@ class UploadService:
                 code="not_ready",
             )
         return upload, self.store.get_object_stream(upload["object_key"])
+
+    # ------------------------------------------------------------------ 裁剪
+    def create_crop(self, upload_id: str, *, t: int, z: int, c: int,
+                    x: int, y: int, width: int, height: int
+                    ) -> tuple[dict[str, Any], bool]:
+        """裁剪 (t, z, c) 平面的局部视野，生成二维 OME-TIFF 裁片入湖。
+
+        返回 (裁片信息, 是否新建)。同一 upload_id + 同一组参数幂等：
+        重复请求返回已存在的裁片，不重复解码/发布。原件只读不改。
+        """
+        upload = self.get_upload(upload_id)
+        if upload["status"] != "completed":
+            raise ConflictError(
+                f"任务状态为 {upload['status']}，尚未开放裁剪",
+                code="not_ready",
+            )
+        params = {"t": t, "z": z, "c": c, "x": x, "y": y,
+                  "width": width, "height": height}
+        with db.connect() as conn:
+            existing = db.get_crop_by_params(conn, upload_id, **params)
+        if existing is not None:
+            return self._crop_response(existing), False
+
+        settings.tmp_dir.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        src_tmp = settings.tmp_dir / f"crop-src-{token}.tiff"
+        out_tmp = settings.tmp_dir / f"crop-out-{token}.ome.tiff"
+        try:
+            self.store.download_to_file(upload["object_key"], str(src_tmp))
+            actual = src_tmp.stat().st_size
+            if actual != upload["total_bytes"]:
+                raise StorageError(
+                    f"读取中断：湖内原件下载得 {actual} 字节，"
+                    f"应为 {upload['total_bytes']} 字节，已放弃本次裁剪"
+                )
+            result = crop_ome_tiff(src_tmp, out_tmp, **params)
+            payload = out_tmp.read_bytes()
+        finally:
+            for path in (src_tmp, out_tmp):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        crop_id = uuid.uuid4().hex
+        # 裁片对象归入原上传目录下的 crops/ 前缀，与原件隔离
+        object_key = (
+            upload["object_key"].rsplit("/", 1)[0] + f"/crops/{crop_id}.ome.tiff"
+        )
+        self.store.put_object(object_key, payload)
+
+        row = {
+            "crop_id": crop_id,
+            "upload_id": upload_id,
+            "object_key": object_key,
+            "filename": _crop_filename(upload["filename"], **params),
+            "t_index": t, "z_index": z, "c_index": c,
+            "x": x, "y": y, "width": width, "height": height,
+            "dtype": result.dtype,
+            "size_bytes": result.size_bytes,
+            "sha256": result.sha256,
+        }
+        with db.connect() as conn:
+            inserted = db.insert_crop_if_absent(conn, row)
+            if not inserted:
+                existing = db.get_crop_by_params(conn, upload_id, **params)
+        if not inserted:
+            # 并发同参裁剪已抢先落库：清理本次多余对象，返回已存在裁片
+            self.store.delete_object(object_key)
+            return self._crop_response(existing), False
+        return self._crop_response(row), True
+
+    def list_crops(self, upload_id: str) -> list[dict[str, Any]]:
+        self.get_upload(upload_id)  # 不存在则 404
+        with db.connect() as conn:
+            rows = db.list_crops(conn, upload_id)
+        return [self._crop_response(row) for row in rows]
+
+    def open_crop_stream(self, crop_id: str):
+        with db.connect() as conn:
+            row = db.get_crop(conn, crop_id)
+        if row is None:
+            raise NotFoundError(f"裁片不存在: {crop_id}")
+        return row, self.store.get_object_stream(row["object_key"])
+
+    @staticmethod
+    def _crop_response(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "crop_id": row["crop_id"],
+            "upload_id": row["upload_id"],
+            "object_key": row["object_key"],
+            "t": row["t_index"],
+            "z": row["z_index"],
+            "c": row["c_index"],
+            "x": row["x"],
+            "y": row["y"],
+            "width": row["width"],
+            "height": row["height"],
+            "dtype": row["dtype"],
+            "size_bytes": row["size_bytes"],
+            "sha256": row["sha256"],
+            "download_url": f"/crops/{row['crop_id']}",
+        }
 
     # ------------------------------------------------------------------ 恢复
     def recover_on_startup(self) -> dict[str, Any]:

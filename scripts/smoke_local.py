@@ -38,6 +38,15 @@ def generate_samples(out: pathlib.Path) -> None:
     small = rng.integers(0, 256, size=(256, 256), dtype=np.uint8)
     with tifffile.TiffWriter(out / "good-small.ome.tiff") as w:
         w.write(small, photometric="minisblack", metadata={"axes": "YX"})
+    tzc = (np.arange(2 * 3 * 2 * 512 * 384, dtype=np.uint16)
+           .reshape(2, 3, 2, 512, 384)
+           + rng.integers(0, 128, size=(2, 3, 2, 512, 384), dtype=np.uint16))
+    with tifffile.TiffWriter(out / "good-tzc.ome.tiff", ome=True) as w:
+        w.write(tzc, photometric="minisblack",
+                metadata={"axes": "TZCYX",
+                          "Channel": {"Name": ["DAPI", "GFP"]},
+                          "PhysicalSizeX": 0.325, "PhysicalSizeXUnit": "µm",
+                          "PhysicalSizeY": 0.325, "PhysicalSizeYUnit": "µm"})
     tifffile.imwrite(out / "bad-no-ome.tiff",
                      np.zeros((2, 64, 64), dtype=np.uint8),
                      photometric="minisblack")

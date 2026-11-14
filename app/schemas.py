@@ -78,3 +78,32 @@ class FaultArmRequest(BaseModel):
     # crash_after_merge：S3 合并成功后、标记完成前崩溃，演示合并后回执丢失
     fault: Literal["crash_after_part", "crash_after_merge"]
     part_number: int | None = None
+
+
+class CropRequest(BaseModel):
+    """焦层局部视野裁剪参数：T/Z/C 逻辑下标 + X/Y 像素矩形。"""
+
+    t: int = Field(0, ge=0, description="T 逻辑下标（缺失轴仅接受 0）")
+    z: int = Field(0, ge=0, description="Z 逻辑下标（焦层，缺失轴仅接受 0）")
+    c: int = Field(0, ge=0, description="C 逻辑下标（通道，缺失轴仅接受 0）")
+    x: int = Field(..., ge=0, description="裁剪矩形左上角 X（像素）")
+    y: int = Field(..., ge=0, description="裁剪矩形左上角 Y（像素）")
+    width: int = Field(..., ge=1, description="裁剪宽度（像素）")
+    height: int = Field(..., ge=1, description="裁剪高度（像素）")
+
+
+class CropResponse(BaseModel):
+    crop_id: str
+    upload_id: str
+    object_key: str
+    t: int
+    z: int
+    c: int
+    x: int
+    y: int
+    width: int
+    height: int
+    dtype: str
+    size_bytes: int
+    sha256: str
+    download_url: str

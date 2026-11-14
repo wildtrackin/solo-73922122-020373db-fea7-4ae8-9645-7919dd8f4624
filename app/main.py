@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import PART_SIZE, settings
@@ -19,6 +19,8 @@ from .schemas import (
     AbortResponse,
     CompleteResponse,
     CreateUploadRequest,
+    CropRequest,
+    CropResponse,
     DimensionsResponse,
     FaultArmRequest,
     PartsResponse,
@@ -176,6 +178,63 @@ async def download_object(upload_id: str):
         headers={
             "Content-Length": str(upload["total_bytes"]),
             "Content-Disposition": f'attachment; filename="{safe_name}"',
+        },
+    )
+
+
+# ------------------------------------------------------------ 焦层视野裁剪
+@app.post("/uploads/{upload_id}/crops", response_model=CropResponse,
+          status_code=201, tags=["裁剪"])
+def create_crop(upload_id: str, payload: CropRequest, response: Response):
+    """按 T/Z/C 逻辑下标与 X/Y 像素矩形裁剪焦层局部视野。
+
+    - 仅 completed 任务开放；按 OME 轴与 TiffData 映射定位目标平面；
+    - 生成二维 OME-TIFF 裁片入湖，保留通道名与像素物理尺寸，原件不改；
+    - 仅支持单文件、单图像序列、灰度 uint8/uint16，
+      且目标平面解码后不超过 16 MiB；缺失轴仅接受下标 0；
+    - 同一 upload_id + 同一组参数幂等：重复请求返回 200 与已有裁片，
+      首次创建返回 201。
+    """
+    row, created = service.create_crop(
+        upload_id,
+        t=payload.t, z=payload.z, c=payload.c,
+        x=payload.x, y=payload.y, width=payload.width, height=payload.height,
+    )
+    if not created:
+        response.status_code = 200
+    return row
+
+
+@app.get("/uploads/{upload_id}/crops", response_model=list[CropResponse],
+         tags=["裁剪"])
+async def list_crops(upload_id: str):
+    """列出某上传任务已生成的全部裁片。"""
+    return service.list_crops(upload_id)
+
+
+@app.get("/crops/{crop_id}", tags=["裁剪"])
+async def download_crop(crop_id: str):
+    """下载裁片：二维 OME-TIFF（image/tiff 流）。"""
+    crop, body = service.open_crop_stream(crop_id)
+
+    def iter_stream():
+        try:
+            for chunk in body.iter_chunks(chunk_size=PART_SIZE):
+                yield chunk
+        finally:
+            body.close()
+
+    safe_name = (
+        crop["filename"].replace("\\", "_").replace('"', "'")
+        .replace("\r", " ").replace("\n", " ")
+    )
+    return StreamingResponse(
+        iter_stream(),
+        media_type="image/tiff",
+        headers={
+            "Content-Length": str(crop["size_bytes"]),
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "X-Crop-SHA256": crop["sha256"],
         },
     )
 

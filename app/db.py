@@ -44,8 +44,28 @@ CREATE TABLE IF NOT EXISTS parts (
     PRIMARY KEY (upload_id, part_number)
 );
 
+CREATE TABLE IF NOT EXISTS crops (
+    crop_id      TEXT PRIMARY KEY,
+    upload_id    TEXT NOT NULL REFERENCES uploads(upload_id),
+    object_key   TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    t_index      INTEGER NOT NULL,
+    z_index      INTEGER NOT NULL,
+    c_index      INTEGER NOT NULL,
+    x            INTEGER NOT NULL,
+    y            INTEGER NOT NULL,
+    width        INTEGER NOT NULL,
+    height       INTEGER NOT NULL,
+    dtype        TEXT NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (upload_id, t_index, z_index, c_index, x, y, width, height)
+);
+
 CREATE INDEX IF NOT EXISTS idx_uploads_sample ON uploads(sample_id);
 CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
+CREATE INDEX IF NOT EXISTS idx_crops_upload ON crops(upload_id);
 """
 
 
@@ -114,6 +134,55 @@ def touch_upload(conn: sqlite3.Connection, upload_id: str) -> None:
         "UPDATE uploads SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE upload_id=?",
         (upload_id,),
     )
+
+
+# --------------------------------------------------------------------- 裁片
+def insert_crop_if_absent(conn: sqlite3.Connection, row: dict[str, Any]) -> bool:
+    """按 (upload_id, 裁剪参数) 唯一约束幂等写入；返回是否真正插入。"""
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO crops
+            (crop_id, upload_id, object_key, filename,
+             t_index, z_index, c_index, x, y, width, height,
+             dtype, size_bytes, sha256)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (row["crop_id"], row["upload_id"], row["object_key"], row["filename"],
+         row["t_index"], row["z_index"], row["c_index"],
+         row["x"], row["y"], row["width"], row["height"],
+         row["dtype"], row["size_bytes"], row["sha256"]),
+    )
+    return cur.rowcount == 1
+
+
+def get_crop_by_params(
+    conn: sqlite3.Connection,
+    upload_id: str,
+    t: int, z: int, c: int,
+    x: int, y: int, width: int, height: int,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT * FROM crops
+        WHERE upload_id=? AND t_index=? AND z_index=? AND c_index=?
+          AND x=? AND y=? AND width=? AND height=?
+        """,
+        (upload_id, t, z, c, x, y, width, height),
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def get_crop(conn: sqlite3.Connection, crop_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM crops WHERE crop_id=?", (crop_id,)).fetchone()
+    return row_to_dict(row)
+
+
+def list_crops(conn: sqlite3.Connection, upload_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM crops WHERE upload_id=? ORDER BY created_at, crop_id",
+        (upload_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def compare_and_set_status(

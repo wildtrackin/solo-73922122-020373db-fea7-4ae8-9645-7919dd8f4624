@@ -4,3 +4,4 @@ boto3==1.44.3
 tifffile==2026.3.3
 numpy==2.4.6
 pydantic==2.14.3
+imagecodecs==2026.3.6

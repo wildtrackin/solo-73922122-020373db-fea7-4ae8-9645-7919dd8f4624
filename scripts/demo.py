@@ -9,6 +9,7 @@
   5. 进程在“分片已写 S3、落库前”崩溃 -> 重启对账 -> 仅补缺片
   6. 进程在“合并成功、回执前”崩溃 -> 重启续完 -> 重试幂等不重复发布
   7. 坏 OME-TIFF 被拒，远端对象删除，原件不开放
+  8. 多维 OME-TIFF 按 T/Z/C + 像素矩形裁剪 -> 二维 OME-TIFF 下载
 """
 from __future__ import annotations
 
@@ -300,6 +301,78 @@ def scenario_7_bad_image():
     check(status == 409, "原件查询不开放")
 
 
+def scenario_8_crop():
+    step("场景 8：多维 OME-TIFF 按 T/Z/C + 像素矩形裁剪 -> 二维 OME-TIFF")
+    import io
+
+    import numpy as np
+    import tifffile
+
+    blob = (SAMPLE_DIR / "good-tzc.ome.tiff").read_bytes()
+    parts = split_parts(blob)
+    up = create_upload("DEMO-8", "good-tzc.ome.tiff", len(blob))
+    for i, chunk in enumerate(parts, start=1):
+        status, _ = put_part(up["upload_id"], i, chunk)
+        check(status == 200, f"分片 {i} 接纳")
+    status, done = complete(up["upload_id"])
+    check(status == 200 and done["axes"] == "TZCYX",
+          f"多维原件入湖（axes={done.get('axes')}）")
+
+    # 裁剪 T=1 Z=2 C=1（GFP 通道）的 200x120 视野
+    params = {"t": 1, "z": 2, "c": 1, "x": 40, "y": 24,
+              "width": 200, "height": 120}
+    status, crop = _request(
+        "POST", f"/uploads/{up['upload_id']}/crops",
+        json.dumps(params).encode(), {"Content-Type": "application/json"})
+    check(status == 201, f"创建裁片 -> {status}")
+    check(crop["width"] == 200 and crop["height"] == 120
+          and crop["dtype"] == "uint16", "裁片元数据正确")
+
+    # 幂等：同参数重放返回 200 与同一裁片
+    status, again = _request(
+        "POST", f"/uploads/{up['upload_id']}/crops",
+        json.dumps(params).encode(), {"Content-Type": "application/json"})
+    check(status == 200 and again["crop_id"] == crop["crop_id"],
+          "同参数裁剪幂等（200，同一 crop_id）")
+
+    # 下载裁片并逐像素核验
+    status, payload, headers = _request_with_headers(
+        "GET", crop["download_url"])
+    check(status == 200 and headers["Content-Type"] == "image/tiff",
+          "裁片可下载（image/tiff）")
+    src = tifffile.imread(str(SAMPLE_DIR / "good-tzc.ome.tiff"))
+    expected = src[1, 2, 1][24:24 + 120, 40:40 + 200]
+    got = tifffile.imread(io.BytesIO(payload))
+    check(got.shape == (120, 200) and got.dtype == np.uint16
+          and np.array_equal(got, expected),
+          "裁片宽高与像素逐点对应裁剪区域")
+    with tifffile.TiffFile(io.BytesIO(payload)) as tf:
+        ome = tf.ome_metadata
+    check('Name="GFP"' in ome and 'PhysicalSizeX="0.325"' in ome,
+          "通道名与像素物理尺寸已保留")
+
+    # 原件未被修改
+    _, original, _ = _request_with_headers(
+        "GET", f"/uploads/{up['upload_id']}/object")
+    check(original == blob, "原件逐字节未变")
+
+    # 越界与缺轴下标明确报错
+    status, err = _request(
+        "POST", f"/uploads/{up['upload_id']}/crops",
+        json.dumps({"x": 0, "y": 0, "width": 99999, "height": 1}).encode(),
+        {"Content-Type": "application/json"})
+    check(status == 400
+          and err["error"]["code"] == "crop_out_of_bounds",
+          "裁剪矩形越界 -> 400 crop_out_of_bounds")
+    status, err = _request(
+        "POST", f"/uploads/{up['upload_id']}/crops",
+        json.dumps({"t": 5, "x": 0, "y": 0, "width": 1, "height": 1}).encode(),
+        {"Content-Type": "application/json"})
+    check(status == 400
+          and err["error"]["code"] == "axis_index_out_of_range",
+          "轴下标越界 -> 400 axis_index_out_of_range")
+
+
 def main() -> None:
     wait_api_ready()
     print(f"API: {API}  样例目录: {SAMPLE_DIR}")
@@ -310,6 +383,7 @@ def main() -> None:
     scenario_5_crash_after_part()
     scenario_6_crash_after_merge()
     scenario_7_bad_image()
+    scenario_8_crop()
     print("\n全部演示场景通过。可在 http://localhost:8000/docs 手动操作全流程。")
 
 

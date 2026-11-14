@@ -12,6 +12,9 @@ PART_SIZE = 8 * 1024 * 1024
 MIN_PART_NUMBER = 1
 MAX_PART_NUMBER = 10000
 
+# 裁剪：目标平面解码后的最大字节数（16 MiB），超出即拒绝
+MAX_PLANE_BYTES = 16 * 1024 * 1024
+
 
 def _env(name: str, default: str) -> str:
     value = os.environ.get(name)
